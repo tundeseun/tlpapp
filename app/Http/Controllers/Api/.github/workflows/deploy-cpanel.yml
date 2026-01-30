@@ -1,0 +1,89 @@
+name: Build & Deploy Laravel to cPanel (no server composer)
+
+on:
+  push:
+    branches: ["main"]
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, intl, pdo, mysql, curl, dom, fileinfo, openssl, tokenizer, xml, zip
+          coverage: none
+
+      - name: Install dependencies (prod)
+        run: composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader
+
+      - name: Package for deploy
+        run: |
+          tar \
+            --exclude=".git" \
+            --exclude=".github" \
+            --exclude="deploy.tar.gz" \
+            --exclude="storage/logs/*" \
+            --exclude="storage/framework/cache/*" \
+            --exclude="storage/framework/sessions/*" \
+            --exclude="storage/framework/views/*" \
+            -czf deploy.tar.gz .
+
+      - name: Upload package to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.CPANEL_HOST }}
+          username: ${{ secrets.CPANEL_USER }}
+          key: ${{ secrets.CPANEL_SSH_KEY }}
+          source: "deploy.tar.gz"
+          target: "/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
+
+      - name: Extract + migrate on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.CPANEL_HOST }}
+          username: ${{ secrets.CPANEL_USER }}
+          key: ${{ secrets.CPANEL_SSH_KEY }}
+          script: |
+            set -e
+
+            APP_DIR="${{ secrets.DEPLOY_PATH }}"
+            STAGE_DIR="/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
+            PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
+
+            mkdir -p "$APP_DIR"
+
+            echo "== Extract package =="
+            tar -xzf "$STAGE_DIR/deploy.tar.gz" -C "$APP_DIR"
+            rm -f "$STAGE_DIR/deploy.tar.gz"
+
+            echo "== Permissions =="
+            chmod -R ug+rwx "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
+
+            cd "$APP_DIR"
+
+            echo "== Cache refresh =="
+            $PHP_BIN artisan config:clear || true
+            $PHP_BIN artisan cache:clear || true
+            $PHP_BIN artisan route:clear || true
+            $PHP_BIN artisan view:clear || true
+            $PHP_BIN artisan config:cache || true
+            $PHP_BIN artisan route:cache || true
+            $PHP_BIN artisan view:cache || true
+
+            echo "== Run migrations =="
+            $PHP_BIN artisan migrate --force
+
+            echo "== Storage link =="
+            $PHP_BIN artisan storage:link || true
+
+            echo "✅ Deploy complete"
