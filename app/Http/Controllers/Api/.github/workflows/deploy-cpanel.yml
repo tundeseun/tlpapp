@@ -1,4 +1,4 @@
-name: Build & Deploy Laravel to cPanel
+name: Build & Deploy Laravel to cPanel (no server composer)
 
 on:
   push:
@@ -9,31 +9,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
+  build-deploy:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup PHP (8.2)
+      - name: Setup PHP 8.3
         uses: shivammathur/setup-php@v2
         with:
-          php-version: "8.2"
+          php-version: "8.3"
           extensions: mbstring, intl, pdo, mysql, curl, dom, fileinfo, openssl, tokenizer, xml, zip
           coverage: none
 
-      - name: Install Composer dependencies (prod)
-        run: |
-          composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader
+      - name: Install dependencies (prod)
+        run: composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader
 
-      # If you use Laravel caches, it's fine to build them on server, not here.
-
-      - name: Create deploy artifact
+      - name: Package for deploy
         run: |
           tar --exclude=".git" --exclude=".github" -czf deploy.tar.gz .
 
-      - name: Copy artifact to server
+      - name: Upload package to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.CPANEL_HOST }}
@@ -42,7 +39,7 @@ jobs:
           source: "deploy.tar.gz"
           target: "/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
 
-      - name: Deploy on server (extract + migrate)
+      - name: Extract + migrate on server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.CPANEL_HOST }}
@@ -53,32 +50,20 @@ jobs:
 
             APP_DIR="${{ secrets.DEPLOY_PATH }}"
             STAGE_DIR="/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
+            PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
 
             mkdir -p "$APP_DIR"
 
-            echo "== Extract deploy package =="
-            cd "$STAGE_DIR"
-            tar -xzf deploy.tar.gz -C "$APP_DIR"
-            rm -f deploy.tar.gz
+            echo "== Extract package =="
+            tar -xzf "$STAGE_DIR/deploy.tar.gz" -C "$APP_DIR"
+            rm -f "$STAGE_DIR/deploy.tar.gz"
 
             echo "== Permissions =="
             chmod -R ug+rwx "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
 
-            # Use whichever php CLI works on your server for artisan.
-            # Your earlier php -v shows 8.1.33; artisan may still run, but Laravel 12 expects 8.2+.
-            # Let's try ea-php83 first if available, otherwise fall back to system php.
-            if [ -x /opt/cpanel/ea-php83/root/usr/bin/php ]; then
-              PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
-            elif [ -x /opt/cpanel/ea-php82/root/usr/bin/php ]; then
-              PHP_BIN="/opt/cpanel/ea-php82/root/usr/bin/php"
-            else
-              PHP_BIN="php"
-            fi
-
-            echo "Using PHP: $PHP_BIN"
             cd "$APP_DIR"
 
-            echo "== Clear & cache (server) =="
+            echo "== Cache refresh =="
             $PHP_BIN artisan config:clear || true
             $PHP_BIN artisan cache:clear || true
             $PHP_BIN artisan route:clear || true
