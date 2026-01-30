@@ -24,11 +24,24 @@ jobs:
           coverage: none
 
       - name: Install dependencies (prod)
-        run: composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader
+        run: |
+          composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader
 
+      # Create archive OUTSIDE repo to avoid tar changing-while-reading error
       - name: Package for deploy
         run: |
-          tar --exclude=".git" --exclude=".github" -czf deploy.tar.gz .
+          rm -f deploy.tar.gz
+          tar -czf /tmp/deploy.tar.gz \
+            --exclude=".git" \
+            --exclude=".github" \
+            --exclude="deploy.tar.gz" \
+            --exclude="storage/logs/*" \
+            --exclude="storage/framework/cache/*" \
+            --exclude="storage/framework/sessions/*" \
+            --exclude="storage/framework/views/*" \
+            .
+          mv /tmp/deploy.tar.gz deploy.tar.gz
+          ls -lh deploy.tar.gz
 
       - name: Upload package to server
         uses: appleboy/scp-action@v0.1.7
