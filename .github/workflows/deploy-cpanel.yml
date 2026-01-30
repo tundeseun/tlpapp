@@ -59,34 +59,71 @@ jobs:
           username: ${{ secrets.CPANEL_USER }}
           key: ${{ secrets.CPANEL_SSH_KEY }}
           script: |
-            set -e
+            set -euxo pipefail
 
             APP_DIR="${{ secrets.DEPLOY_PATH }}"
             STAGE_DIR="/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
             PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
 
+            echo "== Whoami & paths =="
+            whoami
+            pwd
+            echo "APP_DIR=$APP_DIR"
+            echo "STAGE_DIR=$STAGE_DIR"
+            echo "PHP_BIN=$PHP_BIN"
+
+            echo "== Check files uploaded =="
+            ls -lah "$STAGE_DIR" || true
+            test -f "$STAGE_DIR/deploy.tar.gz"
+
+            echo "== Ensure app dir exists =="
             mkdir -p "$APP_DIR"
 
             echo "== Extract package =="
             tar -xzf "$STAGE_DIR/deploy.tar.gz" -C "$APP_DIR"
             rm -f "$STAGE_DIR/deploy.tar.gz"
 
+            echo "== List app dir after extract =="
+            ls -lah "$APP_DIR" | head -n 50
+
+            echo "== Check critical files =="
+            test -f "$APP_DIR/artisan"
+            test -f "$APP_DIR/composer.json"
+            test -d "$APP_DIR/vendor" || (echo "❌ vendor/ missing. Did the GitHub build include vendor?" && exit 1)
+
+            echo "== Check .env =="
+            if [ ! -f "$APP_DIR/.env" ]; then
+              echo "❌ .env is missing at $APP_DIR/.env"
+              echo "Create it ON THE SERVER (do NOT commit .env), then re-run workflow."
+              exit 1
+            fi
+
+            echo "== PHP version/modules =="
+            $PHP_BIN -v
+            $PHP_BIN -m | egrep -i 'pdo|mbstring|openssl|tokenizer|xml|ctype|json' || true
+
             echo "== Permissions =="
+            mkdir -p "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
             chmod -R ug+rwx "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
 
             cd "$APP_DIR"
+
+            echo "== Artisan test =="
+            $PHP_BIN artisan --version
 
             echo "== Cache refresh =="
             $PHP_BIN artisan config:clear || true
             $PHP_BIN artisan cache:clear || true
             $PHP_BIN artisan route:clear || true
             $PHP_BIN artisan view:clear || true
-            $PHP_BIN artisan config:cache || true
-            $PHP_BIN artisan route:cache || true
-            $PHP_BIN artisan view:cache || true
 
             echo "== Run migrations =="
             $PHP_BIN artisan migrate --force
+
+            echo "== Cache build =="
+            $PHP_BIN artisan config:cache || true
+            $PHP_BIN artisan route:cache || true
+            $PHP_BIN artisan view:cache || true
 
             echo "== Storage link =="
             $PHP_BIN artisan storage:link || true
