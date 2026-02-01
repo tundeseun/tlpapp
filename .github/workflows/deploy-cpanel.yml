@@ -23,22 +23,26 @@ jobs:
           extensions: mbstring, intl, pdo, mysql, curl, dom, fileinfo, openssl, tokenizer, xml, zip
           coverage: none
 
+      - name: Validate composer files
+        run: |
+          composer validate --no-check-publish || true
+
       - name: Install dependencies (prod)
         run: |
-          composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader
+          composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
 
-      - name: Package for deploy
+      - name: Package for deploy (exclude .env, storage runtime)
         run: |
+          set -euxo pipefail
           rm -f deploy.tar.gz
           tar -czf /tmp/deploy.tar.gz \
             --exclude=".git" \
             --exclude=".github" \
             --exclude="deploy.tar.gz" \
             --exclude=".env" \
-            --exclude="storage/logs/*" \
-            --exclude="storage/framework/cache/*" \
-            --exclude="storage/framework/sessions/*" \
-            --exclude="storage/framework/views/*" \
+            --exclude="storage" \
+            --exclude="public/storage" \
+            --exclude="node_modules" \
             .
           mv /tmp/deploy.tar.gz deploy.tar.gz
           ls -lh deploy.tar.gz
@@ -52,6 +56,10 @@ jobs:
           port: ${{ secrets.CPANEL_PORT }}
           source: "deploy.tar.gz"
           target: "/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
+          timeout: 120s
+          command_timeout: 30m
+          overwrite: true
+          debug: true
 
       - name: Extract + rsync + migrate on server (safe)
         uses: appleboy/ssh-action@v1.0.3
@@ -60,13 +68,20 @@ jobs:
           username: ${{ secrets.CPANEL_USER }}
           key: ${{ secrets.CPANEL_SSH_KEY }}
           port: ${{ secrets.CPANEL_PORT }}
+          command_timeout: 30m
+          debug: true
           script: |
             set -euxo pipefail
 
             APP_DIR="${{ secrets.DEPLOY_PATH }}"
             STAGE_DIR="/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
             RELEASE_DIR="$STAGE_DIR/release"
-            PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
+
+            # If your cPanel php path differs, set it in secrets as CPANEL_PHP_BIN
+            PHP_BIN="${{ secrets.CPANEL_PHP_BIN }}"
+            if [ -z "${PHP_BIN:-}" ]; then
+              PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
+            fi
 
             echo "== Paths =="
             echo "APP_DIR=$APP_DIR"
@@ -74,7 +89,7 @@ jobs:
             echo "RELEASE_DIR=$RELEASE_DIR"
             echo "PHP_BIN=$PHP_BIN"
 
-            echo "== Check package uploaded =="
+            echo "== Check uploaded package =="
             ls -lah "$STAGE_DIR" || true
             test -f "$STAGE_DIR/deploy.tar.gz"
 
@@ -86,15 +101,19 @@ jobs:
             tar -xzf "$STAGE_DIR/deploy.tar.gz" -C "$RELEASE_DIR"
             rm -f "$STAGE_DIR/deploy.tar.gz"
 
-            echo "== Verify critical files in release =="
+            echo "== Verify release looks like a Laravel app =="
             test -f "$RELEASE_DIR/artisan"
             test -f "$RELEASE_DIR/composer.json"
 
             echo "== Ensure app dir exists =="
             mkdir -p "$APP_DIR"
 
-            echo "== Rsync into APP_DIR (preserve server .env & storage) =="
-            # NOTE: remove --exclude vendor/ if you want vendor updated from GitHub build
+            echo "== Ensure rsync exists =="
+            command -v rsync >/dev/null 2>&1 || (echo "❌ rsync not found on server. Ask host to install rsync." && exit 1)
+
+            echo "== Rsync into APP_DIR (preserve server .env + storage) =="
+            # By default, keep server vendor/ (fast + safe).
+            # If you want vendor updated from GitHub build, remove: --exclude "vendor/"
             rsync -a --delete \
               --exclude ".env" \
               --exclude "storage/" \
@@ -102,36 +121,37 @@ jobs:
               --exclude "vendor/" \
               "$RELEASE_DIR/" "$APP_DIR/"
 
-            echo "== Permissions =="
+            echo "== Ensure runtime dirs + permissions =="
             mkdir -p "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
             chmod -R ug+rwx "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
 
-            echo "== Check .env exists on server =="
+            echo "== Check .env exists on server (must be created on server) =="
             if [ ! -f "$APP_DIR/.env" ]; then
               echo "❌ .env is missing at $APP_DIR/.env"
+              echo "Create it ON THE SERVER (do NOT commit .env), then re-run workflow."
               exit 1
             fi
 
             cd "$APP_DIR"
 
-            echo "== Artisan test =="
-            $PHP_BIN artisan --version
+            echo "== PHP info =="
+            "$PHP_BIN" -v
 
-            echo "== Cache refresh =="
-            $PHP_BIN artisan config:clear || true
-            $PHP_BIN artisan cache:clear || true
-            $PHP_BIN artisan route:clear || true
-            $PHP_BIN artisan view:clear || true
+            echo "== Artisan smoke test =="
+            "$PHP_BIN" artisan --version
 
-            echo "== Migrations =="
-            $PHP_BIN artisan migrate --force
+            echo "== Clear caches =="
+            "$PHP_BIN" artisan optimize:clear || true
 
-            echo "== Cache build =="
-            $PHP_BIN artisan config:cache || true
-            $PHP_BIN artisan route:cache || true
-            $PHP_BIN artisan view:cache || true
+            echo "== Run migrations =="
+            "$PHP_BIN" artisan migrate --force
 
-            echo "== Storage link =="
-            $PHP_BIN artisan storage:link || true
+            echo "== Rebuild caches (optional) =="
+            "$PHP_BIN" artisan config:cache || true
+            "$PHP_BIN" artisan route:cache || true
+            "$PHP_BIN" artisan view:cache || true
+
+            echo "== Storage link (ignore if already exists) =="
+            "$PHP_BIN" artisan storage:link || true
 
             echo "✅ Deploy complete"
