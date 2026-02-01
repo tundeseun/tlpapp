@@ -2,29 +2,35 @@
 
 return [
 
-    // 'paths' => ['api/*', 'sanctum/csrf-cookie'],
-      'paths' => [
+    /*
+    |--------------------------------------------------------------------------
+    | CORS Paths
+    |--------------------------------------------------------------------------
+    | Because your API is accessed via /public/api/*, we must include it here.
+    */
+    'paths' => [
         'api/*',
-        'public/api/*',           // ✅ IMPORTANT for your /public/api URLs
+        'public/api/*',
         'sanctum/csrf-cookie',
         'public/sanctum/csrf-cookie',
     ],
 
     'allowed_methods' => ['*'],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Allowed Origins
+    |--------------------------------------------------------------------------
+    | NOTE: Origins cannot include /public.
+    */
     'allowed_origins' => [
-        // React dev (optional because patterns below already cover it)
-        'http://localhost:5173',
-        'http://127.0.0.1:5173',
-        'http://localhost:5174',
-        'http://127.0.0.1:5174',
-
-        // Production
         'https://app.thelightersplace.co.uk',
-        'https://app.thelightersplace.co.uk/public',
     ],
 
-    // ✅ Covers Flutter Web random ports like localhost:53837
+    /*
+    |--------------------------------------------------------------------------
+    | Allow any localhost port for dev (Flutter web runs on random ports)
+    */
     'allowed_origins_patterns' => [
         '/^http:\/\/localhost:\d+$/',
         '/^http:\/\/127\.0\.0\.1:\d+$/',
@@ -36,6 +42,6 @@ return [
 
     'max_age' => 0,
 
-    // Bearer token auth (no cookies)
+    // Using Bearer token auth (NOT cookies), so false is correct.
     'supports_credentials' => false,
 ];
