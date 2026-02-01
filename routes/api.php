@@ -21,8 +21,6 @@ use App\Http\Controllers\Api\Admin\AdminQuizController;
 // routes/api.php
 Route::get('/v1/__ping', fn () => response()->json(['ok' => true]));
 
-
-
 Route::get('/lessons/{lessonId}/quiz', [AdminQuizController::class, 'show']);
 Route::put('/lessons/{lessonId}/quiz', [AdminQuizController::class, 'upsert']);
 
