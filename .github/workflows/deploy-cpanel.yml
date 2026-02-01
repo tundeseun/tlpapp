@@ -1,4 +1,4 @@
-name: Build & Deploy Laravel to cPanel (rsync safe)
+name: Build & Deploy Laravel to cPanel (cPanel-safe overlay)
 
 on:
   push:
@@ -23,15 +23,12 @@ jobs:
           extensions: mbstring, intl, pdo, mysql, curl, dom, fileinfo, openssl, tokenizer, xml, zip
           coverage: none
 
-      - name: Validate composer files
-        run: |
-          composer validate --no-check-publish || true
-
       - name: Install dependencies (prod)
         run: |
+          set -euxo pipefail
           composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
 
-      - name: Package for deploy (exclude .env, storage runtime)
+      - name: Package for deploy (exclude .env + runtime storage)
         run: |
           set -euxo pipefail
           rm -f deploy.tar.gz
@@ -61,7 +58,7 @@ jobs:
           overwrite: true
           debug: true
 
-      - name: Extract + rsync + migrate on server (safe)
+      - name: Extract + overlay copy + migrate (no rsync needed)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.CPANEL_HOST }}
@@ -76,12 +73,7 @@ jobs:
             APP_DIR="${{ secrets.DEPLOY_PATH }}"
             STAGE_DIR="/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
             RELEASE_DIR="$STAGE_DIR/release"
-
-            # If your cPanel php path differs, set it in secrets as CPANEL_PHP_BIN
-            PHP_BIN="${{ secrets.CPANEL_PHP_BIN }}"
-            if [ -z "${PHP_BIN:-}" ]; then
-              PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
-            fi
+            PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
 
             echo "== Paths =="
             echo "APP_DIR=$APP_DIR"
@@ -97,40 +89,58 @@ jobs:
             rm -rf "$RELEASE_DIR"
             mkdir -p "$RELEASE_DIR"
 
-            echo "== Extract to release dir (NOT directly to APP_DIR) =="
+            echo "== Extract to release dir =="
             tar -xzf "$STAGE_DIR/deploy.tar.gz" -C "$RELEASE_DIR"
             rm -f "$STAGE_DIR/deploy.tar.gz"
 
-            echo "== Verify release looks like a Laravel app =="
+            echo "== Verify release looks like Laravel =="
             test -f "$RELEASE_DIR/artisan"
             test -f "$RELEASE_DIR/composer.json"
 
-            echo "== Ensure app dir exists =="
+            echo "== Ensure APP_DIR exists =="
             mkdir -p "$APP_DIR"
 
-            echo "== Ensure rsync exists =="
-            command -v rsync >/dev/null 2>&1 || (echo "❌ rsync not found on server. Ask host to install rsync." && exit 1)
-
-            echo "== Rsync into APP_DIR (preserve server .env + storage) =="
-            # By default, keep server vendor/ (fast + safe).
-            # If you want vendor updated from GitHub build, remove: --exclude "vendor/"
-            rsync -a --delete \
-              --exclude ".env" \
-              --exclude "storage/" \
-              --exclude "public/storage" \
-              --exclude "vendor/" \
-              "$RELEASE_DIR/" "$APP_DIR/"
-
-            echo "== Ensure runtime dirs + permissions =="
-            mkdir -p "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
-            chmod -R ug+rwx "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
-
-            echo "== Check .env exists on server (must be created on server) =="
+            echo "== Ensure server .env exists (must be on server) =="
             if [ ! -f "$APP_DIR/.env" ]; then
               echo "❌ .env is missing at $APP_DIR/.env"
               echo "Create it ON THE SERVER (do NOT commit .env), then re-run workflow."
               exit 1
             fi
+
+            echo "== Overlay copy (exclude .env/storage/public-storage/vendor) =="
+            # Copy everything EXCEPT protected dirs/files.
+            # NOTE: vendor/ is excluded by default (because you said files already exist on cPanel).
+            # If you want to deploy vendor from GitHub build, remove the vendor line below.
+            shopt -s dotglob
+            for item in "$RELEASE_DIR"/*; do
+              base="$(basename "$item")"
+              case "$base" in
+                .env|storage|public|vendor)
+                  echo "skip $base"
+                  ;;
+                *)
+                  cp -a "$item" "$APP_DIR/"
+                  ;;
+              esac
+            done
+
+            # Special handling for public/: copy public contents but keep public/storage
+            if [ -d "$RELEASE_DIR/public" ]; then
+              mkdir -p "$APP_DIR/public"
+              shopt -s dotglob
+              for pitem in "$RELEASE_DIR/public"/*; do
+                pbase="$(basename "$pitem")"
+                if [ "$pbase" = "storage" ]; then
+                  echo "skip public/storage"
+                  continue
+                fi
+                cp -a "$pitem" "$APP_DIR/public/"
+              done
+            fi
+
+            echo "== Ensure runtime dirs + permissions =="
+            mkdir -p "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
+            chmod -R ug+rwx "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
 
             cd "$APP_DIR"
 
@@ -151,7 +161,7 @@ jobs:
             "$PHP_BIN" artisan route:cache || true
             "$PHP_BIN" artisan view:cache || true
 
-            echo "== Storage link (ignore if already exists) =="
+            echo "== Storage link =="
             "$PHP_BIN" artisan storage:link || true
 
             echo "✅ Deploy complete"
