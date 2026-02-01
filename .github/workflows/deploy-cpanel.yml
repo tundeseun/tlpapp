@@ -1,4 +1,4 @@
-name: Build & Deploy Laravel to cPanel (cPanel-safe, no rsync)
+name: Build & Deploy Laravel to cPanel (retry-safe)
 
 on:
   push:
@@ -26,14 +26,9 @@ jobs:
       - name: Install Composer dependencies (prod)
         run: |
           set -euxo pipefail
-          composer install \
-            --no-dev \
-            --prefer-dist \
-            --no-interaction \
-            --no-progress \
-            --optimize-autoloader
+          composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
 
-      - name: Package for deploy (ships vendor; keeps server .env + storage)
+      - name: Package for deploy
         run: |
           set -euxo pipefail
           rm -f deploy.tar.gz
@@ -49,27 +44,39 @@ jobs:
           mv /tmp/deploy.tar.gz deploy.tar.gz
           ls -lh deploy.tar.gz
 
-      - name: Upload package to server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.CPANEL_HOST }}
-          username: ${{ secrets.CPANEL_USER }}
-          key: ${{ secrets.CPANEL_SSH_KEY }}
-          port: ${{ secrets.CPANEL_PORT }}   # ✅ create this secret (usually 22)
-          source: "deploy.tar.gz"
-          target: "/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
-          overwrite: true
-          timeout: 120s
-          command_timeout: 30m
-          debug: true
+      # ✅ Retry wrapper around SCP: 3 attempts
+      - name: Upload package to server (retry)
+        shell: bash
+        env:
+          CPANEL_HOST: ${{ secrets.CPANEL_HOST }}
+          CPANEL_USER: ${{ secrets.CPANEL_USER }}
+          CPANEL_PORT: ${{ secrets.CPANEL_PORT }}
+          CPANEL_SSH_KEY: ${{ secrets.CPANEL_SSH_KEY }}
+        run: |
+          set -euxo pipefail
+          echo "$CPANEL_SSH_KEY" > /tmp/id_rsa
+          chmod 600 /tmp/id_rsa
 
-      - name: Extract + overlay copy + verify + migrate
+          for i in 1 2 3; do
+            echo "== SCP attempt $i =="
+            if scp -o StrictHostKeyChecking=no -P "$CPANEL_PORT" -i /tmp/id_rsa deploy.tar.gz "$CPANEL_USER@$CPANEL_HOST:/home/$CPANEL_USER/tmp-deploy/deploy.tar.gz"; then
+              echo "✅ Uploaded"
+              break
+            fi
+            if [ "$i" -eq 3 ]; then
+              echo "❌ SCP failed after 3 attempts"
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Extract + deploy + migrate on server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.CPANEL_HOST }}
           username: ${{ secrets.CPANEL_USER }}
           key: ${{ secrets.CPANEL_SSH_KEY }}
-          port: ${{ secrets.CPANEL_PORT }}   # ✅ create this secret (usually 22)
+          port: ${{ secrets.CPANEL_PORT }}
           command_timeout: 30m
           debug: true
           script: |
@@ -80,116 +87,69 @@ jobs:
             RELEASE_DIR="$STAGE_DIR/release"
             PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
 
-            echo "== Validate DEPLOY_PATH =="
-            echo "DEPLOY_PATH='$APP_DIR'"
+            # Validate DEPLOY_PATH absolute
             if [ -z "${APP_DIR:-}" ]; then
-              echo "❌ DEPLOY_PATH is empty. Set it to /home/${{ secrets.CPANEL_USER }}/your-laravel-folder"
+              echo "❌ DEPLOY_PATH is empty"
               exit 1
             fi
             case "$APP_DIR" in
               /*) ;;
-              *)
-                echo "❌ DEPLOY_PATH must be an absolute path starting with '/'. Current: '$APP_DIR'"
-                echo "Example: /home/${{ secrets.CPANEL_USER }}/tlpapp"
-                exit 1
-                ;;
+              *) echo "❌ DEPLOY_PATH must start with /"; exit 1 ;;
             esac
 
-            echo "== Paths =="
-            echo "APP_DIR=$APP_DIR"
-            echo "STAGE_DIR=$STAGE_DIR"
-            echo "RELEASE_DIR=$RELEASE_DIR"
-            echo "PHP_BIN=$PHP_BIN"
-
-            echo "== Check uploaded package =="
-            ls -lah "$STAGE_DIR" || true
+            mkdir -p "$STAGE_DIR"
             test -f "$STAGE_DIR/deploy.tar.gz"
 
-            echo "== Prepare release dir =="
             rm -rf "$RELEASE_DIR"
             mkdir -p "$RELEASE_DIR"
-
-            echo "== Extract to release dir =="
             tar -xzf "$STAGE_DIR/deploy.tar.gz" -C "$RELEASE_DIR"
             rm -f "$STAGE_DIR/deploy.tar.gz"
 
-            echo "== Verify release is Laravel + vendor shipped =="
             test -f "$RELEASE_DIR/artisan"
-            test -f "$RELEASE_DIR/composer.json"
             test -f "$RELEASE_DIR/vendor/autoload.php"
 
-            echo "== Ensure APP_DIR exists =="
             mkdir -p "$APP_DIR"
 
-            echo "== Ensure server .env exists (must be created on server) =="
             if [ ! -f "$APP_DIR/.env" ]; then
               echo "❌ .env missing at $APP_DIR/.env"
-              echo "Create it on server (do NOT commit .env), then re-run."
               exit 1
             fi
 
-            echo "== Overlay copy (protect .env, storage, public/storage) =="
-            # Copy root files/folders except: storage and public (public handled separately)
+            # Copy everything except storage + public (public handled separately)
             for item in "$RELEASE_DIR"/*; do
               base="$(basename "$item")"
               if [ "$base" = "storage" ] || [ "$base" = "public" ]; then
-                echo "skip $base"
                 continue
               fi
               cp -a "$item" "$APP_DIR/"
             done
 
-            # Copy public contents but skip public/storage
+            # Copy public excluding public/storage
             if [ -d "$RELEASE_DIR/public" ]; then
               mkdir -p "$APP_DIR/public"
               for pitem in "$RELEASE_DIR/public"/*; do
                 pbase="$(basename "$pitem")"
                 if [ "$pbase" = "storage" ]; then
-                  echo "skip public/storage"
                   continue
                 fi
                 cp -a "$pitem" "$APP_DIR/public/"
               done
             fi
 
-            echo "== Ensure runtime dirs + permissions =="
             mkdir -p "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
             chmod -R ug+rwx "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
 
-            echo "== Final sanity checks =="
-            test -f "$APP_DIR/artisan"
-            test -f "$APP_DIR/vendor/autoload.php"
-
             cd "$APP_DIR"
-
-            echo "== PHP info =="
             "$PHP_BIN" -v
+            "$PHP_BIN" artisan --version
 
-            echo "== Artisan smoke test (print errors) =="
-            set +e
-            "$PHP_BIN" -d display_errors=1 -d display_startup_errors=1 artisan --version 2>&1
-            ART_EXIT=$?
-            set -e
-            if [ "$ART_EXIT" -ne 0 ]; then
-              echo "❌ artisan failed with exit=$ART_EXIT"
-              echo "== Latest Laravel logs (if any) =="
-              ls -lah storage/logs || true
-              tail -n 200 storage/logs/laravel*.log 2>/dev/null || true
-              exit "$ART_EXIT"
-            fi
-
-            echo "== Clear caches =="
             "$PHP_BIN" artisan optimize:clear || true
-
-            echo "== Run migrations =="
             "$PHP_BIN" artisan migrate --force
 
-            echo "== Rebuild caches =="
             "$PHP_BIN" artisan config:cache || true
             "$PHP_BIN" artisan route:cache || true
             "$PHP_BIN" artisan view:cache || true
 
-            echo "== Storage link =="
             "$PHP_BIN" artisan storage:link || true
 
             echo "✅ Deploy complete"
