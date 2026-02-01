@@ -1,4 +1,4 @@
-name: Build & Deploy Laravel to cPanel (no server composer)
+name: Build & Deploy Laravel to cPanel (rsync safe)
 
 on:
   push:
@@ -27,7 +27,6 @@ jobs:
         run: |
           composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader
 
-      # Create archive OUTSIDE repo to avoid tar changing-while-reading error
       - name: Package for deploy
         run: |
           rm -f deploy.tar.gz
@@ -35,6 +34,7 @@ jobs:
             --exclude=".git" \
             --exclude=".github" \
             --exclude="deploy.tar.gz" \
+            --exclude=".env" \
             --exclude="storage/logs/*" \
             --exclude="storage/framework/cache/*" \
             --exclude="storage/framework/sessions/*" \
@@ -49,62 +49,68 @@ jobs:
           host: ${{ secrets.CPANEL_HOST }}
           username: ${{ secrets.CPANEL_USER }}
           key: ${{ secrets.CPANEL_SSH_KEY }}
+          port: ${{ secrets.CPANEL_PORT }}
           source: "deploy.tar.gz"
           target: "/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
 
-      - name: Extract + migrate on server
+      - name: Extract + rsync + migrate on server (safe)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.CPANEL_HOST }}
           username: ${{ secrets.CPANEL_USER }}
           key: ${{ secrets.CPANEL_SSH_KEY }}
+          port: ${{ secrets.CPANEL_PORT }}
           script: |
             set -euxo pipefail
 
             APP_DIR="${{ secrets.DEPLOY_PATH }}"
             STAGE_DIR="/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
+            RELEASE_DIR="$STAGE_DIR/release"
             PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
 
-            echo "== Whoami & paths =="
-            whoami
-            pwd
+            echo "== Paths =="
             echo "APP_DIR=$APP_DIR"
             echo "STAGE_DIR=$STAGE_DIR"
+            echo "RELEASE_DIR=$RELEASE_DIR"
             echo "PHP_BIN=$PHP_BIN"
 
-            echo "== Check files uploaded =="
+            echo "== Check package uploaded =="
             ls -lah "$STAGE_DIR" || true
             test -f "$STAGE_DIR/deploy.tar.gz"
+
+            echo "== Prepare release dir =="
+            rm -rf "$RELEASE_DIR"
+            mkdir -p "$RELEASE_DIR"
+
+            echo "== Extract to release dir (NOT directly to APP_DIR) =="
+            tar -xzf "$STAGE_DIR/deploy.tar.gz" -C "$RELEASE_DIR"
+            rm -f "$STAGE_DIR/deploy.tar.gz"
+
+            echo "== Verify critical files in release =="
+            test -f "$RELEASE_DIR/artisan"
+            test -f "$RELEASE_DIR/composer.json"
 
             echo "== Ensure app dir exists =="
             mkdir -p "$APP_DIR"
 
-            echo "== Extract package =="
-            tar -xzf "$STAGE_DIR/deploy.tar.gz" -C "$APP_DIR"
-            rm -f "$STAGE_DIR/deploy.tar.gz"
-
-            echo "== List app dir after extract =="
-            ls -lah "$APP_DIR" | head -n 50
-
-            echo "== Check critical files =="
-            test -f "$APP_DIR/artisan"
-            test -f "$APP_DIR/composer.json"
-            test -d "$APP_DIR/vendor" || (echo "❌ vendor/ missing. Did the GitHub build include vendor?" && exit 1)
-
-            echo "== Check .env =="
-            if [ ! -f "$APP_DIR/.env" ]; then
-              echo "❌ .env is missing at $APP_DIR/.env"
-              echo "Create it ON THE SERVER (do NOT commit .env), then re-run workflow."
-              exit 1
-            fi
-
-            echo "== PHP version/modules =="
-            $PHP_BIN -v
-            $PHP_BIN -m | egrep -i 'pdo|mbstring|openssl|tokenizer|xml|ctype|json' || true
+            echo "== Rsync into APP_DIR (preserve server .env & storage) =="
+            # NOTE: remove --exclude vendor/ if you want vendor updated from GitHub build
+            rsync -a --delete \
+              --exclude ".env" \
+              --exclude "storage/" \
+              --exclude "public/storage" \
+              --exclude "vendor/" \
+              "$RELEASE_DIR/" "$APP_DIR/"
 
             echo "== Permissions =="
             mkdir -p "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
             chmod -R ug+rwx "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
+
+            echo "== Check .env exists on server =="
+            if [ ! -f "$APP_DIR/.env" ]; then
+              echo "❌ .env is missing at $APP_DIR/.env"
+              exit 1
+            fi
 
             cd "$APP_DIR"
 
@@ -117,7 +123,7 @@ jobs:
             $PHP_BIN artisan route:clear || true
             $PHP_BIN artisan view:clear || true
 
-            echo "== Run migrations =="
+            echo "== Migrations =="
             $PHP_BIN artisan migrate --force
 
             echo "== Cache build =="

@@ -34,8 +34,12 @@ Route::post('/lessons/{lessonId}/quiz/submit', [QuizController::class, 'submit']
 
 Route::prefix('v1')->group(function () {
     Route::post('auth/admin/register', [AdminAuthController::class, 'register']);
-});
+ Route::post('auth/admin/login', [AdminAuthController::class, 'login']);
 
+    });
+Route::middleware('auth:sanctum')->post('/logout', [
+        AdminAuthController::class,
+        'logout']);
 
 Route::prefix('v1')->group(function () {
 
