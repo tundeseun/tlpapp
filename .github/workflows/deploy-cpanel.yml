@@ -33,7 +33,7 @@ jobs:
             --no-progress \
             --optimize-autoloader
 
-      - name: Package for deploy (ship vendor, keep server .env + storage)
+      - name: Package for deploy (ships vendor; keeps server .env + storage)
         run: |
           set -euxo pipefail
           rm -f deploy.tar.gz
@@ -55,7 +55,7 @@ jobs:
           host: ${{ secrets.CPANEL_HOST }}
           username: ${{ secrets.CPANEL_USER }}
           key: ${{ secrets.CPANEL_SSH_KEY }}
-          port: ${{ secrets.CPANEL_PORT }}
+          port: ${{ secrets.CPANEL_PORT }}   # ✅ create this secret (usually 22)
           source: "deploy.tar.gz"
           target: "/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
           overwrite: true
@@ -63,13 +63,13 @@ jobs:
           command_timeout: 30m
           debug: true
 
-      - name: Extract + overlay copy + verify + migrate (clear diagnostics)
+      - name: Extract + overlay copy + verify + migrate
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.CPANEL_HOST }}
           username: ${{ secrets.CPANEL_USER }}
           key: ${{ secrets.CPANEL_SSH_KEY }}
-          port: ${{ secrets.CPANEL_PORT }}
+          port: ${{ secrets.CPANEL_PORT }}   # ✅ create this secret (usually 22)
           command_timeout: 30m
           debug: true
           script: |
@@ -79,6 +79,21 @@ jobs:
             STAGE_DIR="/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
             RELEASE_DIR="$STAGE_DIR/release"
             PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
+
+            echo "== Validate DEPLOY_PATH =="
+            echo "DEPLOY_PATH='$APP_DIR'"
+            if [ -z "${APP_DIR:-}" ]; then
+              echo "❌ DEPLOY_PATH is empty. Set it to /home/${{ secrets.CPANEL_USER }}/your-laravel-folder"
+              exit 1
+            fi
+            case "$APP_DIR" in
+              /*) ;;
+              *)
+                echo "❌ DEPLOY_PATH must be an absolute path starting with '/'. Current: '$APP_DIR'"
+                echo "Example: /home/${{ secrets.CPANEL_USER }}/tlpapp"
+                exit 1
+                ;;
+            esac
 
             echo "== Paths =="
             echo "APP_DIR=$APP_DIR"
@@ -98,9 +113,10 @@ jobs:
             tar -xzf "$STAGE_DIR/deploy.tar.gz" -C "$RELEASE_DIR"
             rm -f "$STAGE_DIR/deploy.tar.gz"
 
-            echo "== Verify release looks like Laravel =="
+            echo "== Verify release is Laravel + vendor shipped =="
             test -f "$RELEASE_DIR/artisan"
             test -f "$RELEASE_DIR/composer.json"
+            test -f "$RELEASE_DIR/vendor/autoload.php"
 
             echo "== Ensure APP_DIR exists =="
             mkdir -p "$APP_DIR"
@@ -112,29 +128,20 @@ jobs:
               exit 1
             fi
 
-            echo "== Overlay copy from release into APP_DIR (protect .env, storage, public/storage) =="
-            shopt -s dotglob
-
-            # Copy everything except protected items
+            echo "== Overlay copy (protect .env, storage, public/storage) =="
+            # Copy root files/folders except: storage and public (public handled separately)
             for item in "$RELEASE_DIR"/*; do
               base="$(basename "$item")"
-              case "$base" in
-                .env|storage)
-                  echo "skip $base"
-                  ;;
-                public)
-                  echo "skip public (handled separately)"
-                  ;;
-                *)
-                  cp -a "$item" "$APP_DIR/"
-                  ;;
-              esac
+              if [ "$base" = "storage" ] || [ "$base" = "public" ]; then
+                echo "skip $base"
+                continue
+              fi
+              cp -a "$item" "$APP_DIR/"
             done
 
-            # Copy public, but keep public/storage
+            # Copy public contents but skip public/storage
             if [ -d "$RELEASE_DIR/public" ]; then
               mkdir -p "$APP_DIR/public"
-              shopt -s dotglob
               for pitem in "$RELEASE_DIR/public"/*; do
                 pbase="$(basename "$pitem")"
                 if [ "$pbase" = "storage" ]; then
@@ -149,16 +156,11 @@ jobs:
             mkdir -p "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
             chmod -R ug+rwx "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
 
-            cd "$APP_DIR"
+            echo "== Final sanity checks =="
+            test -f "$APP_DIR/artisan"
+            test -f "$APP_DIR/vendor/autoload.php"
 
-            echo "== Confirm vendor exists =="
-            if [ ! -f "$APP_DIR/vendor/autoload.php" ]; then
-              echo "❌ vendor/autoload.php missing in APP_DIR"
-              echo "This deploy ships vendor. If it's missing, DEPLOY_PATH is likely wrong."
-              echo "APP_DIR listing:"
-              ls -lah "$APP_DIR" | head -n 120
-              exit 1
-            fi
+            cd "$APP_DIR"
 
             echo "== PHP info =="
             "$PHP_BIN" -v
@@ -168,7 +170,6 @@ jobs:
             "$PHP_BIN" -d display_errors=1 -d display_startup_errors=1 artisan --version 2>&1
             ART_EXIT=$?
             set -e
-
             if [ "$ART_EXIT" -ne 0 ]; then
               echo "❌ artisan failed with exit=$ART_EXIT"
               echo "== Latest Laravel logs (if any) =="
