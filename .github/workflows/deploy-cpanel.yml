@@ -1,4 +1,4 @@
-name: Build & Deploy Laravel to cPanel (retry-safe)
+name: Build & Deploy Laravel to cPanel (safe copy, no deletes)
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
           set -euxo pipefail
           composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
 
-      - name: Package for deploy
+      - name: Package for deploy (ships vendor; excludes runtime storage)
         run: |
           set -euxo pipefail
           rm -f deploy.tar.gz
@@ -44,7 +44,6 @@ jobs:
           mv /tmp/deploy.tar.gz deploy.tar.gz
           ls -lh deploy.tar.gz
 
-      # ✅ Retry wrapper around SCP: 3 attempts
       - name: Upload package to server (retry)
         shell: bash
         env:
@@ -70,7 +69,7 @@ jobs:
             sleep 10
           done
 
-      - name: Extract + deploy + migrate on server
+      - name: Extract + safe copy + optional artisan
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.CPANEL_HOST }}
@@ -87,16 +86,18 @@ jobs:
             RELEASE_DIR="$STAGE_DIR/release"
             PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
 
-            # Validate DEPLOY_PATH absolute
+            echo "== Validate DEPLOY_PATH =="
+            echo "APP_DIR=$APP_DIR"
             if [ -z "${APP_DIR:-}" ]; then
               echo "❌ DEPLOY_PATH is empty"
               exit 1
             fi
             case "$APP_DIR" in
               /*) ;;
-              *) echo "❌ DEPLOY_PATH must start with /"; exit 1 ;;
+              *) echo "❌ DEPLOY_PATH must be an absolute path starting with /"; exit 1 ;;
             esac
 
+            echo "== Stage & extract =="
             mkdir -p "$STAGE_DIR"
             test -f "$STAGE_DIR/deploy.tar.gz"
 
@@ -105,40 +106,65 @@ jobs:
             tar -xzf "$STAGE_DIR/deploy.tar.gz" -C "$RELEASE_DIR"
             rm -f "$STAGE_DIR/deploy.tar.gz"
 
+            echo "== Verify release =="
             test -f "$RELEASE_DIR/artisan"
             test -f "$RELEASE_DIR/vendor/autoload.php"
 
+            echo "== Ensure APP_DIR exists =="
             mkdir -p "$APP_DIR"
 
-            if [ ! -f "$APP_DIR/.env" ]; then
-              echo "❌ .env missing at $APP_DIR/.env"
-              exit 1
-            fi
-
-            # Copy everything except storage + public (public handled separately)
+            echo "== Safe copy into APP_DIR (NO deletes) =="
+            # Copy everything from release into APP_DIR, but NEVER overwrite .env if it exists
+            # Also do not touch storage/ and do not touch public/storage
             for item in "$RELEASE_DIR"/*; do
               base="$(basename "$item")"
-              if [ "$base" = "storage" ] || [ "$base" = "public" ]; then
+              if [ "$base" = "storage" ]; then
+                echo "skip storage"
+                continue
+              fi
+              if [ "$base" = "public" ]; then
+                echo "public handled separately"
+                continue
+              fi
+              if [ "$base" = ".env" ]; then
+                echo "skip .env"
                 continue
               fi
               cp -a "$item" "$APP_DIR/"
             done
 
-            # Copy public excluding public/storage
+            # Copy public/ but keep public/storage if it exists
             if [ -d "$RELEASE_DIR/public" ]; then
               mkdir -p "$APP_DIR/public"
               for pitem in "$RELEASE_DIR/public"/*; do
                 pbase="$(basename "$pitem")"
                 if [ "$pbase" = "storage" ]; then
+                  echo "skip public/storage"
                   continue
                 fi
                 cp -a "$pitem" "$APP_DIR/public/"
               done
             fi
 
+            echo "== Ensure runtime dirs =="
             mkdir -p "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
             chmod -R ug+rwx "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
 
+            echo "== If .env missing, create a placeholder and skip artisan =="
+            if [ ! -f "$APP_DIR/.env" ]; then
+              if [ -f "$RELEASE_DIR/.env.example" ]; then
+                cp -n "$RELEASE_DIR/.env.example" "$APP_DIR/.env" || true
+                chmod 640 "$APP_DIR/.env" || true
+                echo "⚠️ .env was missing. I created it from .env.example."
+                echo "⚠️ Please edit $APP_DIR/.env with DB credentials and APP_URL, then re-run workflow."
+              else
+                echo "⚠️ .env missing and .env.example not found. Please create $APP_DIR/.env manually."
+              fi
+              echo "✅ Files deployed (artisan skipped because env is not confirmed)."
+              exit 0
+            fi
+
+            echo "== Run artisan (only when .env exists) =="
             cd "$APP_DIR"
             "$PHP_BIN" -v
             "$PHP_BIN" artisan --version
