@@ -1,4 +1,4 @@
-name: Build & Deploy Laravel to cPanel (cPanel-safe overlay)
+name: Build & Deploy Laravel to cPanel (cPanel-safe, no rsync)
 
 on:
   push:
@@ -23,12 +23,17 @@ jobs:
           extensions: mbstring, intl, pdo, mysql, curl, dom, fileinfo, openssl, tokenizer, xml, zip
           coverage: none
 
-      - name: Install dependencies (prod)
+      - name: Install Composer dependencies (prod)
         run: |
           set -euxo pipefail
-          composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
+          composer install \
+            --no-dev \
+            --prefer-dist \
+            --no-interaction \
+            --no-progress \
+            --optimize-autoloader
 
-      - name: Package for deploy (exclude .env + runtime storage)
+      - name: Package for deploy (ship vendor, keep server .env + storage)
         run: |
           set -euxo pipefail
           rm -f deploy.tar.gz
@@ -53,12 +58,12 @@ jobs:
           port: ${{ secrets.CPANEL_PORT }}
           source: "deploy.tar.gz"
           target: "/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
+          overwrite: true
           timeout: 120s
           command_timeout: 30m
-          overwrite: true
           debug: true
 
-      - name: Extract + overlay copy + migrate (no rsync needed)
+      - name: Extract + overlay copy + verify + migrate (clear diagnostics)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.CPANEL_HOST }}
@@ -100,23 +105,25 @@ jobs:
             echo "== Ensure APP_DIR exists =="
             mkdir -p "$APP_DIR"
 
-            echo "== Ensure server .env exists (must be on server) =="
+            echo "== Ensure server .env exists (must be created on server) =="
             if [ ! -f "$APP_DIR/.env" ]; then
-              echo "❌ .env is missing at $APP_DIR/.env"
-              echo "Create it ON THE SERVER (do NOT commit .env), then re-run workflow."
+              echo "❌ .env missing at $APP_DIR/.env"
+              echo "Create it on server (do NOT commit .env), then re-run."
               exit 1
             fi
 
-            echo "== Overlay copy (exclude .env/storage/public-storage/vendor) =="
-            # Copy everything EXCEPT protected dirs/files.
-            # NOTE: vendor/ is excluded by default (because you said files already exist on cPanel).
-            # If you want to deploy vendor from GitHub build, remove the vendor line below.
+            echo "== Overlay copy from release into APP_DIR (protect .env, storage, public/storage) =="
             shopt -s dotglob
+
+            # Copy everything except protected items
             for item in "$RELEASE_DIR"/*; do
               base="$(basename "$item")"
               case "$base" in
-                .env|storage|public|vendor)
+                .env|storage)
                   echo "skip $base"
+                  ;;
+                public)
+                  echo "skip public (handled separately)"
                   ;;
                 *)
                   cp -a "$item" "$APP_DIR/"
@@ -124,7 +131,7 @@ jobs:
               esac
             done
 
-            # Special handling for public/: copy public contents but keep public/storage
+            # Copy public, but keep public/storage
             if [ -d "$RELEASE_DIR/public" ]; then
               mkdir -p "$APP_DIR/public"
               shopt -s dotglob
@@ -144,11 +151,31 @@ jobs:
 
             cd "$APP_DIR"
 
+            echo "== Confirm vendor exists =="
+            if [ ! -f "$APP_DIR/vendor/autoload.php" ]; then
+              echo "❌ vendor/autoload.php missing in APP_DIR"
+              echo "This deploy ships vendor. If it's missing, DEPLOY_PATH is likely wrong."
+              echo "APP_DIR listing:"
+              ls -lah "$APP_DIR" | head -n 120
+              exit 1
+            fi
+
             echo "== PHP info =="
             "$PHP_BIN" -v
 
-            echo "== Artisan smoke test =="
-            "$PHP_BIN" artisan --version
+            echo "== Artisan smoke test (print errors) =="
+            set +e
+            "$PHP_BIN" -d display_errors=1 -d display_startup_errors=1 artisan --version 2>&1
+            ART_EXIT=$?
+            set -e
+
+            if [ "$ART_EXIT" -ne 0 ]; then
+              echo "❌ artisan failed with exit=$ART_EXIT"
+              echo "== Latest Laravel logs (if any) =="
+              ls -lah storage/logs || true
+              tail -n 200 storage/logs/laravel*.log 2>/dev/null || true
+              exit "$ART_EXIT"
+            fi
 
             echo "== Clear caches =="
             "$PHP_BIN" artisan optimize:clear || true
@@ -156,7 +183,7 @@ jobs:
             echo "== Run migrations =="
             "$PHP_BIN" artisan migrate --force
 
-            echo "== Rebuild caches (optional) =="
+            echo "== Rebuild caches =="
             "$PHP_BIN" artisan config:cache || true
             "$PHP_BIN" artisan route:cache || true
             "$PHP_BIN" artisan view:cache || true
