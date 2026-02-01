@@ -2,7 +2,13 @@
 
 return [
 
-    'paths' => ['api/*', 'sanctum/csrf-cookie'],
+    // 'paths' => ['api/*', 'sanctum/csrf-cookie'],
+      'paths' => [
+        'api/*',
+        'public/api/*',           // ✅ IMPORTANT for your /public/api URLs
+        'sanctum/csrf-cookie',
+        'public/sanctum/csrf-cookie',
+    ],
 
     'allowed_methods' => ['*'],
 
