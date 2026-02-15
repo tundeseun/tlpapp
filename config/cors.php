@@ -25,6 +25,7 @@ return [
     */
     'allowed_origins' => [
         'https://app.thelightersplace.co.uk',
+        'https://admin.thelightersplace.co.uk',
     ],
 
     /*
