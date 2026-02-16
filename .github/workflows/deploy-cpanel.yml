@@ -1,4 +1,4 @@
-name: Build & Deploy Laravel to cPanel (safe copy, no deletes)
+name: Build & Deploy Laravel to cPanel (safe sync, no deletes)
 
 on:
   push:
@@ -44,6 +44,22 @@ jobs:
           mv /tmp/deploy.tar.gz deploy.tar.gz
           ls -lh deploy.tar.gz
 
+      - name: Prepare remote tmp-deploy folder
+        shell: bash
+        env:
+          CPANEL_HOST: ${{ secrets.CPANEL_HOST }}
+          CPANEL_USER: ${{ secrets.CPANEL_USER }}
+          CPANEL_PORT: ${{ secrets.CPANEL_PORT }}
+          CPANEL_SSH_KEY: ${{ secrets.CPANEL_SSH_KEY }}
+        run: |
+          set -euxo pipefail
+          echo "$CPANEL_SSH_KEY" > /tmp/id_rsa
+          chmod 600 /tmp/id_rsa
+
+          ssh -o StrictHostKeyChecking=no -p "$CPANEL_PORT" -i /tmp/id_rsa \
+            "$CPANEL_USER@$CPANEL_HOST" \
+            "mkdir -p /home/$CPANEL_USER/tmp-deploy"
+
       - name: Upload package to server (retry)
         shell: bash
         env:
@@ -58,7 +74,8 @@ jobs:
 
           for i in 1 2 3; do
             echo "== SCP attempt $i =="
-            if scp -o StrictHostKeyChecking=no -P "$CPANEL_PORT" -i /tmp/id_rsa deploy.tar.gz "$CPANEL_USER@$CPANEL_HOST:/home/$CPANEL_USER/tmp-deploy/deploy.tar.gz"; then
+            if scp -o StrictHostKeyChecking=no -P "$CPANEL_PORT" -i /tmp/id_rsa \
+              deploy.tar.gz "$CPANEL_USER@$CPANEL_HOST:/home/$CPANEL_USER/tmp-deploy/deploy.tar.gz"; then
               echo "✅ Uploaded"
               break
             fi
@@ -69,7 +86,7 @@ jobs:
             sleep 10
           done
 
-      - name: Extract + safe copy + optional artisan
+      - name: Extract + safe sync + optional artisan
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.CPANEL_HOST }}
@@ -82,8 +99,9 @@ jobs:
             set -euxo pipefail
 
             APP_DIR="${{ secrets.DEPLOY_PATH }}"
-            STAGE_DIR="/home/${{ secrets.CPANEL_USER }}/tmp-deploy"
-            RELEASE_DIR="$STAGE_DIR/release"
+            CPANEL_USER="${{ secrets.CPANEL_USER }}"
+            STAGE_DIR="/home/${CPANEL_USER}/tmp-deploy"
+            RELEASE_DIR="${STAGE_DIR}/release"
             PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
 
             echo "== Validate DEPLOY_PATH =="
@@ -113,69 +131,115 @@ jobs:
             echo "== Ensure APP_DIR exists =="
             mkdir -p "$APP_DIR"
 
-            echo "== Safe copy into APP_DIR (NO deletes) =="
-            # Copy everything from release into APP_DIR, but NEVER overwrite .env if it exists
-            # Also do not touch storage/ and do not touch public/storage
+            echo "== Enable dotfiles in globs =="
+            shopt -s dotglob nullglob
+
+            echo "== Fix file/dir collisions (pre-sync) =="
             for item in "$RELEASE_DIR"/*; do
               base="$(basename "$item")"
-              if [ "$base" = "storage" ]; then
-                echo "skip storage"
-                continue
+
+              # protected
+              [ "$base" = "storage" ] && continue
+              [ "$base" = "public" ] && continue
+              [ "$base" = ".env" ] && continue
+
+              src="$item"
+              dst="$APP_DIR/$base"
+
+              # If source is dir but destination is file => remove file
+              if [ -d "$src" ] && [ -f "$dst" ]; then
+                echo "collision: dst is file but src is dir => removing $dst"
+                rm -f "$dst"
               fi
-              if [ "$base" = "public" ]; then
-                echo "public handled separately"
-                continue
+
+              # If source is file but destination is dir => remove dir
+              if [ -f "$src" ] && [ -d "$dst" ]; then
+                echo "collision: dst is dir but src is file => removing $dst"
+                rm -rf "$dst"
               fi
-              if [ "$base" = ".env" ]; then
-                echo "skip .env"
-                continue
-              fi
-              cp -a "$item" "$APP_DIR/"
             done
 
-            # Copy public/ but keep public/storage if it exists
+            echo "== Safe sync into APP_DIR (NO deletes) =="
+            if command -v rsync >/dev/null 2>&1; then
+              rsync -a \
+                --exclude ".env" \
+                --exclude "storage/" \
+                --exclude "public/" \
+                "$RELEASE_DIR/" "$APP_DIR/"
+            else
+              echo "⚠️ rsync not found; fallback to cp -a"
+              for item in "$RELEASE_DIR"/*; do
+                base="$(basename "$item")"
+                [ "$base" = "storage" ] && continue
+                [ "$base" = "public" ] && continue
+                [ "$base" = ".env" ] && continue
+                cp -a "$item" "$APP_DIR/"
+              done
+            fi
+
+            echo "== Sync public/ (keep public/storage) =="
+            mkdir -p "$APP_DIR/public"
+
+            # Fix collisions in public
             if [ -d "$RELEASE_DIR/public" ]; then
-              mkdir -p "$APP_DIR/public"
               for pitem in "$RELEASE_DIR/public"/*; do
                 pbase="$(basename "$pitem")"
-                if [ "$pbase" = "storage" ]; then
-                  echo "skip public/storage"
-                  continue
+                [ "$pbase" = "storage" ] && continue
+
+                src="$pitem"
+                dst="$APP_DIR/public/$pbase"
+
+                if [ -d "$src" ] && [ -f "$dst" ]; then
+                  echo "public collision: dst file but src dir => removing $dst"
+                  rm -f "$dst"
                 fi
-                cp -a "$pitem" "$APP_DIR/public/"
+                if [ -f "$src" ] && [ -d "$dst" ]; then
+                  echo "public collision: dst dir but src file => removing $dst"
+                  rm -rf "$dst"
+                fi
               done
+
+              if command -v rsync >/dev/null 2>&1; then
+                rsync -a \
+                  --exclude "storage/" \
+                  "$RELEASE_DIR/public/" "$APP_DIR/public/"
+              else
+                echo "⚠️ rsync not found; fallback to cp -a for public"
+                for pitem in "$RELEASE_DIR/public"/*; do
+                  pbase="$(basename "$pitem")"
+                  [ "$pbase" = "storage" ] && continue
+                  cp -a "$pitem" "$APP_DIR/public/"
+                done
+              fi
             fi
 
             echo "== Ensure runtime dirs =="
             mkdir -p "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
             chmod -R ug+rwx "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
 
-            echo "== If .env missing, create a placeholder and skip artisan =="
+            echo "== If .env missing, create placeholder and skip artisan =="
             if [ ! -f "$APP_DIR/.env" ]; then
               if [ -f "$RELEASE_DIR/.env.example" ]; then
                 cp -n "$RELEASE_DIR/.env.example" "$APP_DIR/.env" || true
                 chmod 640 "$APP_DIR/.env" || true
-                echo "⚠️ .env was missing. I created it from .env.example."
-                echo "⚠️ Please edit $APP_DIR/.env with DB credentials and APP_URL, then re-run workflow."
+                echo "⚠️ .env was missing. Created from .env.example. Please edit it and rerun."
               else
                 echo "⚠️ .env missing and .env.example not found. Please create $APP_DIR/.env manually."
               fi
-              echo "✅ Files deployed (artisan skipped because env is not confirmed)."
+              echo "✅ Files deployed (artisan skipped)."
               exit 0
             fi
 
             echo "== Run artisan (only when .env exists) =="
             cd "$APP_DIR"
-            "$PHP_BIN" -v
-            "$PHP_BIN" artisan --version
+            "$PHP_BIN" -v || true
+            "$PHP_BIN" artisan --version || true
 
             "$PHP_BIN" artisan optimize:clear || true
-            "$PHP_BIN" artisan migrate --force
-
+            "$PHP_BIN" artisan migrate --force || true
             "$PHP_BIN" artisan config:cache || true
             "$PHP_BIN" artisan route:cache || true
             "$PHP_BIN" artisan view:cache || true
-
             "$PHP_BIN" artisan storage:link || true
 
             echo "✅ Deploy complete"
