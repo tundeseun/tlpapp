@@ -80,8 +80,8 @@ class AdminAuthController extends Controller
      */
     public function logout(Request $req)
     {
-        $req->user()->currentAccessToken()->delete();
-
+        // $req->user()->currentAccessToken()->delete();
+        $req->user()?->tokens()->delete();
         return response()->json([
             'status'  => true,
             'message' => 'Logged out successfully',
