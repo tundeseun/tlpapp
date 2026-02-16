@@ -1,4 +1,4 @@
-name: Build & Deploy Laravel to cPanel (safe sync, no deletes)
+name: Build & Deploy Laravel to cPanel (safe sync, debug host/path)
 
 on:
   push:
@@ -86,7 +86,7 @@ jobs:
             sleep 10
           done
 
-      - name: Extract + safe sync + optional artisan
+      - name: Extract + safe sync + debug + optional artisan
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.CPANEL_HOST }}
@@ -104,8 +104,19 @@ jobs:
             RELEASE_DIR="${STAGE_DIR}/release"
             PHP_BIN="/opt/cpanel/ea-php83/root/usr/bin/php"
 
+            echo "===================================="
+            echo "🚀 DEPLOY DEBUG INFO"
+            echo "Connected host: ${{ secrets.CPANEL_HOST }}"
+            echo "Connected user: ${CPANEL_USER}"
+            echo "Server hostname: $(hostname)"
+            echo "Server IP: $(hostname -I || echo 'N/A')"
+            echo "whoami: $(whoami)"
+            echo "HOME: $HOME"
+            echo "PWD: $(pwd)"
+            echo "DEPLOY_PATH(APP_DIR): $APP_DIR"
+            echo "===================================="
+
             echo "== Validate DEPLOY_PATH =="
-            echo "APP_DIR=$APP_DIR"
             if [ -z "${APP_DIR:-}" ]; then
               echo "❌ DEPLOY_PATH is empty"
               exit 1
@@ -131,6 +142,9 @@ jobs:
             echo "== Ensure APP_DIR exists =="
             mkdir -p "$APP_DIR"
 
+            echo "== List APP_DIR BEFORE sync =="
+            ls -la "$APP_DIR" || true
+
             echo "== Enable dotfiles in globs =="
             shopt -s dotglob nullglob
 
@@ -138,7 +152,6 @@ jobs:
             for item in "$RELEASE_DIR"/*; do
               base="$(basename "$item")"
 
-              # protected
               [ "$base" = "storage" ] && continue
               [ "$base" = "public" ] && continue
               [ "$base" = ".env" ] && continue
@@ -146,15 +159,12 @@ jobs:
               src="$item"
               dst="$APP_DIR/$base"
 
-              # If source is dir but destination is file => remove file
               if [ -d "$src" ] && [ -f "$dst" ]; then
-                echo "collision: dst is file but src is dir => removing $dst"
+                echo "collision: dst file but src dir => rm $dst"
                 rm -f "$dst"
               fi
-
-              # If source is file but destination is dir => remove dir
               if [ -f "$src" ] && [ -d "$dst" ]; then
-                echo "collision: dst is dir but src is file => removing $dst"
+                echo "collision: dst dir but src file => rm -rf $dst"
                 rm -rf "$dst"
               fi
             done
@@ -180,7 +190,6 @@ jobs:
             echo "== Sync public/ (keep public/storage) =="
             mkdir -p "$APP_DIR/public"
 
-            # Fix collisions in public
             if [ -d "$RELEASE_DIR/public" ]; then
               for pitem in "$RELEASE_DIR/public"/*; do
                 pbase="$(basename "$pitem")"
@@ -190,21 +199,19 @@ jobs:
                 dst="$APP_DIR/public/$pbase"
 
                 if [ -d "$src" ] && [ -f "$dst" ]; then
-                  echo "public collision: dst file but src dir => removing $dst"
+                  echo "public collision: dst file but src dir => rm $dst"
                   rm -f "$dst"
                 fi
                 if [ -f "$src" ] && [ -d "$dst" ]; then
-                  echo "public collision: dst dir but src file => removing $dst"
+                  echo "public collision: dst dir but src file => rm -rf $dst"
                   rm -rf "$dst"
                 fi
               done
 
               if command -v rsync >/dev/null 2>&1; then
-                rsync -a \
-                  --exclude "storage/" \
-                  "$RELEASE_DIR/public/" "$APP_DIR/public/"
+                rsync -a --exclude "storage/" "$RELEASE_DIR/public/" "$APP_DIR/public/"
               else
-                echo "⚠️ rsync not found; fallback to cp -a for public"
+                echo "⚠️ rsync not found; fallback cp -a for public"
                 for pitem in "$RELEASE_DIR/public"/*; do
                   pbase="$(basename "$pitem")"
                   [ "$pbase" = "storage" ] && continue
@@ -216,6 +223,17 @@ jobs:
             echo "== Ensure runtime dirs =="
             mkdir -p "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
             chmod -R ug+rwx "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
+
+            echo "== Write deploy marker file =="
+            echo "Deployed at: $(date)" > "$APP_DIR/deploy-check.txt"
+            echo "Host: $(hostname)" >> "$APP_DIR/deploy-check.txt"
+            echo "User: $(whoami)" >> "$APP_DIR/deploy-check.txt"
+            echo "APP_DIR: $APP_DIR" >> "$APP_DIR/deploy-check.txt"
+
+            echo "== List APP_DIR AFTER sync =="
+            ls -la "$APP_DIR" || true
+            echo "== Marker file content =="
+            cat "$APP_DIR/deploy-check.txt" || true
 
             echo "== If .env missing, create placeholder and skip artisan =="
             if [ ! -f "$APP_DIR/.env" ]; then
