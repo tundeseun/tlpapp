@@ -14,31 +14,58 @@ class AuthController extends Controller
 {
     public function __construct(private OtpService $otp) {}
 
+    // public function register(Request $req)
+    // {
+    //     $data = $req->validate([
+    //         'name' => 'required|string|max:120',
+    //         'email' => 'required|email|unique:users,email',
+    //         'password' => 'required|string|min:6|confirmed',
+    //     ]);
+
+    //     $user = User::create([
+    //         'name' => $data['name'],
+    //         'email' => strtolower($data['email']),
+    //         'password' => Hash::make($data['password']),
+    //         'role' => 'student',
+    //         'email_verified_at' => Carbon::now(), // ✅ Auto verify immediately
+    //     ]);
+
+    //     return response()->json([
+    //         'message' => 'Registration successful. You can now login.',
+    //         'user' => [
+    //             'id' => $user->id,
+    //             'name' => $user->name,
+    //             'email' => $user->email,
+    //         ],
+    //     ], 201);
+    // }
+
     public function register(Request $req)
-    {
-        $data = $req->validate([
-            'name' => 'required|string|max:120',
-            'email' => 'required|email|unique:users,email',
-            'password' => 'required|string|min:6|confirmed',
-        ]);
+{
+    $data = $req->validate([
+        'name' => 'required|string|max:120',
+        'email' => 'required|email|unique:users,email',
+        'password' => 'required|string|min:6|confirmed',
+    ]);
 
-        $user = User::create([
-            'name' => $data['name'],
-            'email' => strtolower($data['email']),
-            'password' => Hash::make($data['password']),
-            'role' => 'student',
-            'email_verified_at' => Carbon::now(), // ✅ Auto verify immediately
-        ]);
+    $user = User::create([
+        'name' => $data['name'],
+        'email' => strtolower($data['email']),
+        'password' => Hash::make($data['password']),
+        'role' => 'student',
+        'email_verified_at' => Carbon::now(),
+    ]);
 
-        return response()->json([
-            'message' => 'Registration successful. You can now login.',
-            'user' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-            ],
-        ], 201);
-    }
+    // ✅ Return token so mobile can become "authed" immediately
+    $token = $user->createToken('mobile')->plainTextToken;
+
+    return response()->json([
+        'message' => 'Registration successful.',
+        'token' => $token,
+        'user' => $user,
+    ], 201);
+}
+
 
     public function login(Request $req)
     {
