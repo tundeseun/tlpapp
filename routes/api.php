@@ -85,7 +85,7 @@ Route::prefix('v1')->group(function () {
       Route::delete('/lessons/{id}', [AdminLessonController::class, 'destroy']);
       Route::post('/lessons/reorder', [AdminLessonController::class, 'reorder']);
       Route::put('/lessons/{lessonId}/content', [AdminLessonController::class, 'upsertContent']);
-
+      Route::get('/lessons/{lessonId}/content', [AdminLessonController::class, 'showContent']);
       // Reports
       Route::get('/reports/overview', [AdminReportController::class, 'overview']);
       Route::get('/reports/progress-funnel', [AdminReportController::class, 'progressFunnel']);

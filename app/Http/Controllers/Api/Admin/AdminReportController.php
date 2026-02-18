@@ -182,71 +182,165 @@ class AdminReportController extends Controller
     }
 
     // Student drilldown: exact done + outstanding (course/module/lesson)
+    // public function studentProgress(Request $req, int $userId)
+    // {
+    //     $courseId = (int) $req->query('course_id');
+    //     if (!$courseId) {
+    //         return response()->json(['message' => 'course_id required'], 422);
+    //     }
+
+    //     $course = Course::with([
+    //         'modules' => function ($q) {
+    //             $q->orderBy('position');
+    //         },
+    //         'modules.lessons' => function ($q) {
+    //             $q->orderBy('position');
+    //         },
+    //     ])->findOrFail($courseId);
+
+    //     $lessonIds = [];
+    //     foreach ($course->modules as $m) {
+    //         foreach ($m->lessons as $l) {
+    //             $lessonIds[] = $l->id;
+    //         }
+    //     }
+
+    //     $progressMap = LessonProgress::where('user_id', $userId)
+    //         ->whereIn('lesson_id', $lessonIds)
+    //         ->get()
+    //         ->keyBy('lesson_id');
+
+    //     $done = [];
+    //     $outstanding = [];
+
+    //     foreach ($course->modules as $m) {
+    //         foreach ($m->lessons as $l) {
+    //             $p = $progressMap->get($l->id);
+    //             $status = $p?->status ?? 'not_started';
+
+    //             $row = [
+    //                 'module' => $m->title,
+    //                 'lesson' => $l->title,
+    //                 'status' => $status,
+    //                 'watched_seconds' => $p?->watched_seconds ?? 0,
+    //                 'duration_seconds' => $l->duration_seconds,
+    //                 'completed_at' => $p?->completed_at,
+    //             ];
+
+    //             if ($status === 'completed') {
+    //                 $done[] = $row;
+    //             } else {
+    //                 $outstanding[] = $row;
+    //             }
+    //         }
+    //     }
+
+    //     return response()->json([
+    //         'data' => [
+    //             'course' => ['id' => $course->id, 'title' => $course->title],
+    //             'done' => $done,
+    //             'outstanding' => $outstanding,
+    //             'counts' => [
+    //                 'done' => count($done),
+    //                 'outstanding' => count($outstanding),
+    //             ],
+    //         ],
+    //     ]);
+    // }
+
     public function studentProgress(Request $req, int $userId)
-    {
-        $courseId = (int) $req->query('course_id');
-        if (!$courseId) {
-            return response()->json(['message' => 'course_id required'], 422);
-        }
+{
+    $courseId = (int) $req->query('course_id');
+    if (!$courseId) {
+        return response()->json(['message' => 'course_id required'], 422);
+    }
 
-        $course = Course::with([
-            'modules' => function ($q) {
-                $q->orderBy('position');
-            },
-            'modules.lessons' => function ($q) {
-                $q->orderBy('position');
-            },
-        ])->findOrFail($courseId);
+    $course = Course::findOrFail($courseId);
 
-        $lessonIds = [];
-        foreach ($course->modules as $m) {
-            foreach ($m->lessons as $l) {
-                $lessonIds[] = $l->id;
-            }
-        }
+    // ✅ Get module IDs for this course
+    $moduleIds = Module::where('course_id', $courseId)->pluck('id');
 
-        $progressMap = LessonProgress::where('user_id', $userId)
-            ->whereIn('lesson_id', $lessonIds)
-            ->get()
-            ->keyBy('lesson_id');
-
-        $done = [];
-        $outstanding = [];
-
-        foreach ($course->modules as $m) {
-            foreach ($m->lessons as $l) {
-                $p = $progressMap->get($l->id);
-                $status = $p?->status ?? 'not_started';
-
-                $row = [
-                    'module' => $m->title,
-                    'lesson' => $l->title,
-                    'status' => $status,
-                    'watched_seconds' => $p?->watched_seconds ?? 0,
-                    'duration_seconds' => $l->duration_seconds,
-                    'completed_at' => $p?->completed_at,
-                ];
-
-                if ($status === 'completed') {
-                    $done[] = $row;
-                } else {
-                    $outstanding[] = $row;
-                }
-            }
-        }
-
+    if ($moduleIds->isEmpty()) {
         return response()->json([
             'data' => [
                 'course' => ['id' => $course->id, 'title' => $course->title],
-                'done' => $done,
-                'outstanding' => $outstanding,
-                'counts' => [
-                    'done' => count($done),
-                    'outstanding' => count($outstanding),
-                ],
+                'done' => [],
+                'outstanding' => [],
+                'counts' => ['done' => 0, 'outstanding' => 0],
+                'note' => 'No modules found for this course.',
             ],
         ]);
     }
+
+    // ✅ Get lessons for those modules (choose published-only or all)
+    $lessons = Lesson::whereIn('module_id', $moduleIds)
+        // If you ONLY want published lessons, keep this line:
+        // ->where('is_published', true)
+        ->orderBy('position')
+        ->get(['id', 'module_id', 'title', 'duration_seconds']);
+
+    if ($lessons->isEmpty()) {
+        return response()->json([
+            'data' => [
+                'course' => ['id' => $course->id, 'title' => $course->title],
+                'done' => [],
+                'outstanding' => [],
+                'counts' => ['done' => 0, 'outstanding' => 0],
+                'note' => 'No lessons found for this course (check is_published or lesson-module mapping).',
+            ],
+        ]);
+    }
+
+    // ✅ Load modules titles once (for “module” field)
+    $modulesById = Module::whereIn('id', $moduleIds)
+        ->orderBy('position')
+        ->get(['id', 'title'])
+        ->keyBy('id');
+
+    $lessonIds = $lessons->pluck('id');
+
+    // ✅ Progress for user for those lessons
+    $progressMap = LessonProgress::where('user_id', $userId)
+        ->whereIn('lesson_id', $lessonIds)
+        ->get()
+        ->keyBy('lesson_id');
+
+    $done = [];
+    $outstanding = [];
+
+    foreach ($lessons as $l) {
+        $p = $progressMap->get($l->id);
+        $status = $p?->status ?? 'not_started';
+
+        $row = [
+            'module' => $modulesById[$l->module_id]->title ?? 'Unknown Module',
+            'lesson' => $l->title,
+            'status' => $status,
+            'watched_seconds' => (int) ($p?->watched_seconds ?? 0),
+            'duration_seconds' => (int) ($l->duration_seconds ?? 0),
+            'completed_at' => $p?->completed_at,
+        ];
+
+        if ($status === 'completed') {
+            $done[] = $row;
+        } else {
+            $outstanding[] = $row;
+        }
+    }
+
+    return response()->json([
+        'data' => [
+            'course' => ['id' => $course->id, 'title' => $course->title],
+            'done' => $done,
+            'outstanding' => $outstanding,
+            'counts' => [
+                'done' => count($done),
+                'outstanding' => count($outstanding),
+            ],
+        ],
+    ]);
+}
+
 
     // ---------------- Helpers ----------------
     private function countIdleEnrolled(?int $courseId): int

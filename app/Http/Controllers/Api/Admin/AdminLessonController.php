@@ -25,6 +25,28 @@ class AdminLessonController extends Controller {
     return response()->json(['data'=>$l], 201);
   }
 
+  public function showContent(int $lessonId)
+{
+    $lesson = Lesson::query()->findOrFail($lessonId);
+
+    // If you store content in a related table, adjust this accordingly.
+    // Below assumes these columns exist directly on lessons table OR are accessible.
+    // If you use relations like $lesson->video, $lesson->text, $lesson->attachments, keep them.
+
+    return response()->json([
+        'message' => 'Lesson content loaded.',
+        'data' => [
+            'lesson_id' => $lesson->id,
+            'duration_seconds' => $lesson->duration_seconds,
+
+            // If video/text/attachments are stored elsewhere, replace with your actual relations
+            'video' => $lesson->video ?? null,
+            'text' => $lesson->text ?? null,
+            'attachments' => $lesson->attachments ?? [],
+        ],
+    ]);
+}
+
   public function update(Request $req, int $id) {
     $l = Lesson::findOrFail($id);
     $data = $req->validate([
